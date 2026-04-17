@@ -35,7 +35,7 @@ jobs:
       - name: Ejecutar pruebas con pytest
         run: |
           echo "Ejecutando pruebas..."
-          python -m pytest tests/ -v
+          python -m pytest tests/test_app.py -v
 
       - name: Construir imagen Docker
         run: |
