@@ -1,0 +1,140 @@
+name: CI/CD Pipeline (Equivalente a AWS CodePipeline)
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  IMAGE_NAME: mi-app-flask
+
+jobs:
+  # ─────────────────────────────────────────────
+  # FASE 1: BUILD + TEST  (equivale a CodeBuild)
+  # ─────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt
+
+      - name: Ejecutar pruebas con pytest
+        run: |
+          echo "Ejecutando pruebas..."
+          pytest tests/ -v
+
+      - name: Construir imagen Docker
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} ./app
+          docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.IMAGE_NAME }}:latest
+
+      - name: Verificar que el contenedor arranca correctamente
+        run: |
+          docker run -d --name test-container -p 5000:5000 ${{ env.IMAGE_NAME }}:latest
+          sleep 5
+          curl --fail http://localhost:5000/ || (docker logs test-container && exit 1)
+          docker stop test-container
+
+      # Guardar la imagen para usarla en el job de deploy
+      - name: Exportar imagen Docker como artefacto
+        run: docker save ${{ env.IMAGE_NAME }}:latest | gzip > image.tar.gz
+
+      - name: Subir imagen como artefacto del workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar.gz
+          retention-days: 1
+
+  # ─────────────────────────────────────────────
+  # FASE 2: DEPLOY  (equivale a CodeDeploy)
+  # Solo se ejecuta en push a main (no en PRs)
+  # ─────────────────────────────────────────────
+  deploy:
+    name: Deploy a servidor
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Descargar imagen Docker del artefacto
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Cargar imagen Docker
+        run: gunzip -c image.tar.gz | docker load
+
+      # ── Opción A: Deploy a un servidor propio vía SSH ──────────────────
+      # Descomenta este bloque si tienes un servidor con SSH.
+      # Agrega estos Secrets en GitHub → Settings → Secrets and variables → Actions:
+      #   SERVER_HOST   → IP o dominio del servidor
+      #   SERVER_USER   → usuario SSH (ej: ubuntu)
+      #   SERVER_SSH_KEY → clave privada SSH (contenido del archivo .pem o id_rsa)
+
+      # - name: Copiar imagen al servidor
+      #   uses: appleboy/scp-action@v0.1.7
+      #   with:
+      #     host: ${{ secrets.SERVER_HOST }}
+      #     username: ${{ secrets.SERVER_USER }}
+      #     key: ${{ secrets.SERVER_SSH_KEY }}
+      #     source: "image.tar.gz,docker-compose.yml"
+      #     target: "/home/${{ secrets.SERVER_USER }}/mi-app"
+
+      # - name: Desplegar en el servidor vía SSH
+      #   uses: appleboy/ssh-action@v1.0.3
+      #   with:
+      #     host: ${{ secrets.SERVER_HOST }}
+      #     username: ${{ secrets.SERVER_USER }}
+      #     key: ${{ secrets.SERVER_SSH_KEY }}
+      #     script: |
+      #       cd /home/${{ secrets.SERVER_USER }}/mi-app
+      #       gunzip -c image.tar.gz | docker load
+      #       docker compose down
+      #       docker compose up -d
+      #       echo "Despliegue completado exitosamente"
+
+      # ── Opción B: Deploy a Docker Hub (registry público/privado) ───────
+      # Agrega estos Secrets:
+      #   DOCKERHUB_USERNAME → tu usuario de Docker Hub
+      #   DOCKERHUB_TOKEN    → Access Token de Docker Hub
+
+      # - name: Login a Docker Hub
+      #   uses: docker/login-action@v3
+      #   with:
+      #     username: ${{ secrets.DOCKERHUB_USERNAME }}
+      #     password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # - name: Push imagen a Docker Hub
+      #   run: |
+      #     docker tag ${{ env.IMAGE_NAME }}:latest \
+      #       ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+      #     docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Resumen del despliegue
+        run: |
+          echo "============================================"
+          echo "  Construcción y pruebas: EXITOSAS ✅"
+          echo "  Imagen lista: ${{ env.IMAGE_NAME }}:latest"
+          echo "  Commit: ${{ github.sha }}"
+          echo "  Rama: ${{ github.ref_name }}"
+          echo "============================================"
+          echo "Para activar el deploy real, descomenta"
+          echo "la Opción A (SSH) o Opción B (Docker Hub)"
+          echo "en el archivo .github/workflows/ci-cd.yml"
